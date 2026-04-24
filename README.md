@@ -24,6 +24,93 @@
 
 从 [GitHub Releases](https://github.com/hczs/px/releases) 下载对应平台的二进制文件。
 
+不知道下载哪个文件时：
+
+- Apple Silicon Mac 下载 `darwin_arm64`
+- Intel Mac 下载 `darwin_amd64`
+- 常见 Linux x86_64 下载 `linux_amd64`
+- Linux ARM64 下载 `linux_arm64`
+- 常见 Windows x86_64 下载 `windows_amd64.zip`
+- Windows ARM64 下载 `windows_arm64.zip`
+
+### macOS 二进制安装
+
+以下命令以 Apple Silicon Mac 为例。Intel Mac 把 `darwin_arm64` 换成 `darwin_amd64`。
+
+```bash
+cd ~/Downloads
+tar -xzf px_VERSION_darwin_arm64.tar.gz
+chmod +x px
+sudo mv px /usr/local/bin/px
+px init
+```
+
+如果系统提示文件来自未知开发者，执行：
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/px
+```
+
+然后重启终端，或执行 `px init` 输出的 `source ...` 命令。之后即可使用：
+
+```bash
+px on
+px status
+px off
+```
+
+### Linux 二进制安装
+
+以下命令以 x86_64 Linux 为例。ARM64 机器把 `linux_amd64` 换成 `linux_arm64`。
+
+```bash
+cd ~/Downloads
+tar -xzf px_VERSION_linux_amd64.tar.gz
+chmod +x px
+sudo mv px /usr/local/bin/px
+px init
+```
+
+重启终端，或执行 `px init` 输出的 `source ...` 命令。之后即可使用：
+
+```bash
+px on
+px status
+px off
+```
+
+### Windows 二进制安装
+
+1. 从 Releases 下载 `px_VERSION_windows_amd64.zip`。
+2. 解压后得到 `px.exe`。
+3. 在 `px.exe` 所在目录打开 PowerShell，执行：
+
+```powershell
+$InstallDir = "$env:LOCALAPPDATA\Programs\px"
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+Copy-Item .\px.exe "$InstallDir\px.exe" -Force
+
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ";") -notcontains $InstallDir) {
+  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+  $env:Path = "$env:Path;$InstallDir"
+}
+```
+
+确认安装成功：
+
+```powershell
+px init
+```
+
+`px init` 会写入 PowerShell profile。完成后重新打开 PowerShell。之后即可使用：
+
+```powershell
+px on
+px status
+px off
+```
+
 也可以从源码安装：
 
 ```bash
