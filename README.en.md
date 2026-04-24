@@ -24,6 +24,93 @@ It detects common local proxy tools, saves a local config, and installs a shell 
 
 Download a binary for your platform from [GitHub Releases](https://github.com/hczs/px/releases).
 
+If you are not sure which asset to download:
+
+- Apple Silicon Mac: `darwin_arm64`
+- Intel Mac: `darwin_amd64`
+- Common Linux x86_64: `linux_amd64`
+- Linux ARM64: `linux_arm64`
+- Common Windows x86_64: `windows_amd64.zip`
+- Windows ARM64: `windows_arm64.zip`
+
+### macOS Binary Install
+
+The example below is for Apple Silicon Macs. On Intel Macs, replace `darwin_arm64` with `darwin_amd64`.
+
+```bash
+cd ~/Downloads
+tar -xzf px_VERSION_darwin_arm64.tar.gz
+chmod +x px
+sudo mv px /usr/local/bin/px
+px init
+```
+
+If macOS says the file is from an unidentified developer, run:
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/px
+```
+
+Then restart your terminal, or run the `source ...` command printed by `px init`. After that:
+
+```bash
+px on
+px status
+px off
+```
+
+### Linux Binary Install
+
+The example below is for x86_64 Linux. On ARM64 machines, replace `linux_amd64` with `linux_arm64`.
+
+```bash
+cd ~/Downloads
+tar -xzf px_VERSION_linux_amd64.tar.gz
+chmod +x px
+sudo mv px /usr/local/bin/px
+px init
+```
+
+Restart your terminal, or run the `source ...` command printed by `px init`. After that:
+
+```bash
+px on
+px status
+px off
+```
+
+### Windows Binary Install
+
+1. Download `px_VERSION_windows_amd64.zip` from Releases.
+2. Unzip it to get `px.exe`.
+3. Open PowerShell in the directory that contains `px.exe`, then run:
+
+```powershell
+$InstallDir = "$env:LOCALAPPDATA\Programs\px"
+New-Item -ItemType Directory -Force $InstallDir | Out-Null
+Copy-Item .\px.exe "$InstallDir\px.exe" -Force
+
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ";") -notcontains $InstallDir) {
+  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+  $env:Path = "$env:Path;$InstallDir"
+}
+```
+
+Check the installation:
+
+```powershell
+px init
+```
+
+`px init` writes the PowerShell profile integration. Reopen PowerShell. After that:
+
+```powershell
+px on
+px status
+px off
+```
+
 Or install from source:
 
 ```bash
