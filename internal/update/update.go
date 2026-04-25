@@ -1,7 +1,10 @@
 package update
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -40,6 +45,12 @@ type CheckResult struct {
 	UpToDate       bool
 	Asset          Asset
 	ChecksumAsset  Asset
+}
+
+type UpdateResult struct {
+	Check      CheckResult
+	Updated    bool
+	ManualPath string
 }
 
 type releaseResponse struct {
@@ -182,4 +193,192 @@ func checksumFor(checksums []byte, filename string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("find checksum for %s: not found", filename)
+}
+
+func (c Client) Update(ctx context.Context) (UpdateResult, error) {
+	check, err := c.Check(ctx)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if check.UpToDate {
+		return UpdateResult{Check: check}, nil
+	}
+
+	archiveData, err := c.download(ctx, check.Asset.DownloadURL)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	checksumData, err := c.download(ctx, check.ChecksumAsset.DownloadURL)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if err := VerifyChecksum(archiveData, checksumData, check.Asset.Name); err != nil {
+		return UpdateResult{}, err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "pxy-update-*")
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("create update temp dir: %w", err)
+	}
+	archivePath := filepath.Join(tmpDir, check.Asset.Name)
+	if err := os.WriteFile(archivePath, archiveData, 0o600); err != nil {
+		return UpdateResult{}, fmt.Errorf("write update archive: %w", err)
+	}
+	binaryPath, err := ExtractBinary(archiveData, c.GOOS, tmpDir)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if c.GOOS == "windows" {
+		return UpdateResult{Check: check, ManualPath: binaryPath}, nil
+	}
+
+	exe := c.ExecutablePath
+	if exe == "" {
+		exe, err = os.Executable()
+		if err != nil {
+			return UpdateResult{}, fmt.Errorf("resolve executable path: %w", err)
+		}
+	}
+	if err := replaceExecutable(exe, binaryPath); err != nil {
+		return UpdateResult{}, err
+	}
+	return UpdateResult{Check: check, Updated: true}, nil
+}
+
+func (c Client) download(ctx context.Context, url string) ([]byte, error) {
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create download request: %w", err)
+	}
+	req.Header.Set("User-Agent", "pxy")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download %s: status %d", url, resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read download %s: %w", url, err)
+	}
+	return data, nil
+}
+
+func ExtractBinary(archiveData []byte, goos, destDir string) (string, error) {
+	if goos == "windows" {
+		return extractZipBinary(archiveData, destDir)
+	}
+	return extractTarGzBinary(archiveData, destDir)
+}
+
+func extractTarGzBinary(archiveData []byte, destDir string) (string, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(archiveData))
+	if err != nil {
+		return "", fmt.Errorf("open tar.gz: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tar.gz: %w", err)
+		}
+		if filepath.Base(header.Name) != "pxy" {
+			continue
+		}
+		out := filepath.Join(destDir, "pxy")
+		if err := writeExtractedFile(out, tr, 0o755); err != nil {
+			return "", err
+		}
+		return out, nil
+	}
+	return "", fmt.Errorf("extract pxy from tar.gz: not found")
+}
+
+func extractZipBinary(archiveData []byte, destDir string) (string, error) {
+	reader, err := zip.NewReader(bytes.NewReader(archiveData), int64(len(archiveData)))
+	if err != nil {
+		return "", fmt.Errorf("open zip: %w", err)
+	}
+	for _, file := range reader.File {
+		if filepath.Base(file.Name) != "pxy.exe" {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return "", fmt.Errorf("open zip entry: %w", err)
+		}
+		defer rc.Close()
+		out := filepath.Join(destDir, "pxy.exe")
+		if err := writeExtractedFile(out, rc, 0o755); err != nil {
+			return "", err
+		}
+		return out, nil
+	}
+	return "", fmt.Errorf("extract pxy.exe from zip: not found")
+}
+
+func writeExtractedFile(path string, src io.Reader, mode os.FileMode) error {
+	dst, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create extracted binary: %w", err)
+	}
+	defer dst.Close()
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("write extracted binary: %w", err)
+	}
+	return nil
+}
+
+func replaceExecutable(exePath, newPath string) error {
+	info, err := os.Stat(exePath)
+	if err != nil {
+		return fmt.Errorf("stat executable: %w", err)
+	}
+	if err := os.Chmod(newPath, info.Mode()); err != nil {
+		return fmt.Errorf("chmod new executable: %w", err)
+	}
+
+	targetDir := filepath.Dir(exePath)
+	staged, err := os.CreateTemp(targetDir, ".pxy-update-*")
+	if err != nil {
+		return fmt.Errorf("stage new executable: %w", err)
+	}
+	stagedPath := staged.Name()
+	defer os.Remove(stagedPath)
+
+	src, err := os.Open(newPath)
+	if err != nil {
+		staged.Close()
+		return fmt.Errorf("open new executable: %w", err)
+	}
+	if _, err := io.Copy(staged, src); err != nil {
+		src.Close()
+		staged.Close()
+		return fmt.Errorf("copy new executable: %w", err)
+	}
+	if err := src.Close(); err != nil {
+		staged.Close()
+		return fmt.Errorf("close new executable: %w", err)
+	}
+	if err := staged.Chmod(info.Mode()); err != nil {
+		staged.Close()
+		return fmt.Errorf("chmod staged executable: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close staged executable: %w", err)
+	}
+	if err := os.Rename(stagedPath, exePath); err != nil {
+		return fmt.Errorf("replace executable: %w", err)
+	}
+	return nil
 }

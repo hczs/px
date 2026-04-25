@@ -1,11 +1,17 @@
 package update
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -108,4 +114,133 @@ func TestVerifyChecksumMismatch(t *testing.T) {
 	if err := VerifyChecksum(data, []byte(checksums), "pxy_1.2.3_darwin_arm64.tar.gz"); err == nil {
 		t.Fatal("VerifyChecksum error = nil, want mismatch")
 	}
+}
+
+func TestExtractTarGzBinary(t *testing.T) {
+	archive := buildTarGz(t, "pxy", []byte("binary"))
+	dir := t.TempDir()
+
+	got, err := ExtractBinary(archive, "darwin", dir)
+	if err != nil {
+		t.Fatalf("ExtractBinary returned error: %v", err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("read extracted binary: %v", err)
+	}
+	if string(data) != "binary" {
+		t.Fatalf("binary = %q, want binary", data)
+	}
+}
+
+func TestExtractZipBinary(t *testing.T) {
+	archive := buildZip(t, "pxy.exe", []byte("binary"))
+	dir := t.TempDir()
+
+	got, err := ExtractBinary(archive, "windows", dir)
+	if err != nil {
+		t.Fatalf("ExtractBinary returned error: %v", err)
+	}
+	if filepath.Base(got) != "pxy.exe" {
+		t.Fatalf("base = %q, want pxy.exe", filepath.Base(got))
+	}
+}
+
+func TestUpdateReturnsManualPathOnWindows(t *testing.T) {
+	archive := buildZip(t, "pxy.exe", []byte("binary"))
+	sum := sha256.Sum256(archive)
+	checksums := fmt.Sprintf("%x  pxy_1.2.3_windows_amd64.zip\n", sum)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/hczs/pxy/releases/latest":
+			fmt.Fprintf(w, `{"tag_name":"v1.2.3","assets":[{"name":"pxy_1.2.3_windows_amd64.zip","browser_download_url":"%s/archive.zip"},{"name":"checksums.txt","browser_download_url":"%s/checksums.txt"}]}`, serverURL(r), serverURL(r))
+		case "/archive.zip":
+			w.Write(archive)
+		case "/checksums.txt":
+			w.Write([]byte(checksums))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	exe := filepath.Join(t.TempDir(), "pxy.exe")
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatalf("write exe: %v", err)
+	}
+
+	client := Client{
+		Owner:          "hczs",
+		Repo:           "pxy",
+		CurrentVersion: "1.2.2",
+		GOOS:           "windows",
+		GOARCH:         "amd64",
+		ExecutablePath: exe,
+		HTTPClient:     server.Client(),
+		APIBaseURL:     server.URL,
+	}
+
+	got, err := client.Update(context.Background())
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if got.Updated {
+		t.Fatal("Updated = true, want false for Windows manual replacement")
+	}
+	if got.ManualPath == "" {
+		t.Fatal("ManualPath is empty")
+	}
+	oldData, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatalf("read exe: %v", err)
+	}
+	if string(oldData) != "old" {
+		t.Fatalf("exe changed on Windows: %q", oldData)
+	}
+}
+
+func buildTarGz(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(data))}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatalf("write tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func buildZip(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
+	if err != nil {
+		t.Fatalf("create zip entry: %v", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("write zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func serverURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
